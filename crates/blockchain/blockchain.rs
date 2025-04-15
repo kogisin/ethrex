@@ -63,11 +63,11 @@ impl Blockchain {
     }
 
     /// Executes a block withing a new vm instance and state
-    fn execute_block(&self, block: &Block) -> Result<BlockExecutionResult, ChainError> {
+    async fn execute_block(&self, block: &Block) -> Result<BlockExecutionResult, ChainError> {
         // Validate if it can be the new head and find the parent
         let Ok(parent_header) = find_parent_header(&block.header, &self.storage) else {
             // If the parent is not present, we store it as pending.
-            self.storage.add_pending_block(block.clone())?;
+            self.storage.add_pending_block(block.clone()).await?;
             return Err(ChainError::ParentNotFound);
         };
         let chain_config = self.storage.get_chain_config()?;
@@ -101,7 +101,7 @@ impl Blockchain {
         // Validate the block pre-execution
         validate_block(block, parent_header, chain_config)?;
 
-        let execution_result = vm.execute_block_without_clearing_state(block)?;
+        let execution_result = vm.execute_block(block)?;
 
         // Validate execution went alright
         validate_gas_used(&execution_result.receipts, &block.header)?;
@@ -111,7 +111,7 @@ impl Blockchain {
         Ok(execution_result)
     }
 
-    pub fn store_block(
+    pub async fn store_block(
         &self,
         block: &Block,
         execution_result: BlockExecutionResult,
@@ -119,7 +119,8 @@ impl Blockchain {
         // Apply the account updates over the last block's state and compute the new state root
         let new_state_root = self
             .storage
-            .apply_account_updates(block.header.parent_hash, &execution_result.account_updates)?
+            .apply_account_updates(block.header.parent_hash, &execution_result.account_updates)
+            .await?
             .ok_or(ChainError::ParentStateNotFound)?;
 
         // Check state root matches the one in block header
@@ -127,18 +128,25 @@ impl Blockchain {
 
         self.storage
             .add_block(block.clone())
+            .await
             .map_err(ChainError::StoreError)?;
         self.storage
             .add_receipts(block.hash(), execution_result.receipts)
+            .await
             .map_err(ChainError::StoreError)
     }
 
-    pub fn add_block(&self, block: &Block) -> Result<(), ChainError> {
+    pub async fn add_block(&self, block: &Block) -> Result<(), ChainError> {
         let since = Instant::now();
+        // Easiest way to operate on the result of `execute_block` without
+        // having to add too much control flow or return early
+        // Async doesn't play well with `.and_then`
+        let inner = || async {
+            let res = self.execute_block(block).await?;
+            self.store_block(block, res).await
+        };
 
-        let result = self
-            .execute_block(block)
-            .and_then(|res| self.store_block(block, res));
+        let result = inner().await;
 
         let interval = Instant::now().duration_since(since).as_millis();
         if interval != 0 {
@@ -146,7 +154,6 @@ impl Blockchain {
             let throughput = (as_gigas) / (interval as f64) * 1000_f64;
             info!("[METRIC] BLOCK EXECUTION THROUGHPUT: {throughput} Gigagas/s TIME SPENT: {interval} msecs");
         }
-
         result
     }
 
@@ -157,9 +164,9 @@ impl Blockchain {
     /// - [`BatchProcessingFailure`] (if the error was caused by block processing).
     ///
     /// Note: only the last block's state trie is stored in the db
-    pub fn add_blocks_in_batch(
+    pub async fn add_blocks_in_batch(
         &self,
-        blocks: &[Block],
+        blocks: Vec<Block>,
     ) -> Result<(), (ChainError, Option<BatchBlockProcessingFailure>)> {
         let mut last_valid_hash = H256::default();
 
@@ -257,6 +264,7 @@ impl Blockchain {
                 first_block_header.parent_hash,
                 &all_account_updates.into_values().collect::<Vec<_>>(),
             )
+            .await
             .map_err(|e| (e.into(), None))?
             .ok_or((ChainError::ParentStateNotFound, None))?;
 
@@ -265,9 +273,11 @@ impl Blockchain {
 
         self.storage
             .add_blocks(blocks)
+            .await
             .map_err(|e| (e.into(), None))?;
         self.storage
             .add_receipts_for_blocks(all_receipts)
+            .await
             .map_err(|e| (e.into(), None))?;
 
         let elapsed_total = interval.elapsed().as_millis();
@@ -286,7 +296,7 @@ impl Blockchain {
     }
 
     //TODO: Forkchoice Update shouldn't be part of this function
-    pub fn import_blocks(&self, blocks: &Vec<Block>) {
+    pub async fn import_blocks(&self, blocks: &[Block]) {
         let size = blocks.len();
         for block in blocks {
             let hash = block.hash();
@@ -294,7 +304,7 @@ impl Blockchain {
                 "Adding block {} with hash {:#x}.",
                 block.header.number, hash
             );
-            if let Err(error) = self.add_block(block) {
+            if let Err(error) = self.add_block(block).await {
                 warn!(
                     "Failed to add block {} with hash {:#x}: {}.",
                     block.header.number, hash, error
@@ -303,6 +313,7 @@ impl Blockchain {
             if self
                 .storage
                 .update_latest_block_number(block.header.number)
+                .await
                 .is_err()
             {
                 error!("Fatal: added block {} but could not update the block number -- aborting block import", block.header.number);
@@ -311,6 +322,7 @@ impl Blockchain {
             if self
                 .storage
                 .set_canonical_block(block.header.number, hash)
+                .await
                 .is_err()
             {
                 error!(
@@ -325,10 +337,12 @@ impl Blockchain {
             match self.evm_engine {
                 EvmEngine::LEVM => {
                     // We are allowing this not to unwrap so that tests can run even if block execution results in the wrong root hash with LEVM.
-                    let _ = apply_fork_choice(&self.storage, hash, hash, hash);
+                    let _ = apply_fork_choice(&self.storage, hash, hash, hash).await;
                 }
                 EvmEngine::REVM => {
-                    apply_fork_choice(&self.storage, hash, hash, hash).unwrap();
+                    apply_fork_choice(&self.storage, hash, hash, hash)
+                        .await
+                        .unwrap();
                 }
             }
         }
@@ -337,7 +351,7 @@ impl Blockchain {
 
     /// Add a blob transaction and its blobs bundle to the mempool checking that the transaction is valid
     #[cfg(feature = "c-kzg")]
-    pub fn add_blob_transaction_to_pool(
+    pub async fn add_blob_transaction_to_pool(
         &self,
         transaction: EIP4844Transaction,
         blobs_bundle: BlobsBundle,
@@ -350,7 +364,7 @@ impl Blockchain {
         let sender = transaction.sender();
 
         // Validate transaction
-        self.validate_transaction(&transaction, sender)?;
+        self.validate_transaction(&transaction, sender).await?;
 
         // Add transaction and blobs bundle to storage
         let hash = transaction.compute_hash();
@@ -361,14 +375,17 @@ impl Blockchain {
     }
 
     /// Add a transaction to the mempool checking that the transaction is valid
-    pub fn add_transaction_to_pool(&self, transaction: Transaction) -> Result<H256, MempoolError> {
+    pub async fn add_transaction_to_pool(
+        &self,
+        transaction: Transaction,
+    ) -> Result<H256, MempoolError> {
         // Blob transactions should be submitted via add_blob_transaction along with the corresponding blobs bundle
         if matches!(transaction, Transaction::EIP4844Transaction(_)) {
             return Err(MempoolError::BlobTxNoBlobsBundle);
         }
         let sender = transaction.sender();
         // Validate transaction
-        self.validate_transaction(&transaction, sender)?;
+        self.validate_transaction(&transaction, sender).await?;
 
         let hash = transaction.compute_hash();
 
@@ -416,14 +433,14 @@ impl Blockchain {
 
     */
 
-    pub fn validate_transaction(
+    pub async fn validate_transaction(
         &self,
         tx: &Transaction,
         sender: Address,
     ) -> Result<(), MempoolError> {
         // TODO: Add validations here
 
-        let header_no = self.storage.get_latest_block_number()?;
+        let header_no = self.storage.get_latest_block_number().await?;
         let header = self
             .storage
             .get_block_header(header_no)?
@@ -463,7 +480,7 @@ impl Blockchain {
             }
         };
 
-        let maybe_sender_acc_info = self.storage.get_account_info(header_no, sender)?;
+        let maybe_sender_acc_info = self.storage.get_account_info(header_no, sender).await?;
 
         if let Some(sender_acc_info) = maybe_sender_acc_info {
             if tx.nonce() < sender_acc_info.nonce {
@@ -548,8 +565,8 @@ pub fn validate_receipts_root(
 }
 
 // Returns the hash of the head of the canonical chain (the latest valid hash).
-pub fn latest_canonical_block_hash(storage: &Store) -> Result<H256, ChainError> {
-    let latest_block_number = storage.get_latest_block_number()?;
+pub async fn latest_canonical_block_hash(storage: &Store) -> Result<H256, ChainError> {
+    let latest_block_number = storage.get_latest_block_number().await?;
     if let Some(latest_valid_header) = storage.get_block_header(latest_block_number)? {
         let latest_valid_hash = latest_valid_header.compute_block_hash();
         return Ok(latest_valid_hash);
@@ -597,12 +614,12 @@ pub fn validate_block(
     Ok(())
 }
 
-pub fn is_canonical(
+pub async fn is_canonical(
     store: &Store,
     block_number: BlockNumber,
     block_hash: BlockHash,
 ) -> Result<bool, StoreError> {
-    match store.get_canonical_block_hash(block_number)? {
+    match store.get_canonical_block_hash(block_number).await? {
         Some(hash) if hash == block_hash => Ok(true),
         _ => Ok(false),
     }
