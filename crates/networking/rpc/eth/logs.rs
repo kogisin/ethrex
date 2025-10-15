@@ -145,14 +145,14 @@ pub(crate) async fn fetch_logs_with_filter(
             .ok_or(RpcErr::Internal(format!(
                 "Could not get header for block {block_num}"
             )))?;
-        let block_hash = block_header.compute_block_hash();
+        let block_hash = block_header.hash();
 
         let mut block_log_index = 0_u64;
 
         // Since transactions share indices with their receipts,
         // we'll use them to fetch their receipts, which have the actual logs.
         for (tx_index, tx) in block_body.transactions.iter().enumerate() {
-            let tx_hash = tx.compute_hash();
+            let tx_hash = tx.hash();
             let receipt = storage
                 .get_receipt(block_num, tx_index as u64)
                 .await?
@@ -191,18 +191,16 @@ pub(crate) async fn fetch_logs_with_filter(
                 }
                 for (i, topic_filter) in filter.topics.iter().enumerate() {
                     match topic_filter {
-                        TopicFilter::Topic(t) => {
-                            if let Some(topic) = t {
-                                if rpc_log.log.topics[i] != *topic {
-                                    return false;
-                                }
+                        TopicFilter::Topic(topic) => {
+                            if topic.is_some_and(|topic| rpc_log.log.topics[i] != topic) {
+                                return false;
                             }
                         }
                         TopicFilter::Topics(sub_topics) => {
                             if !sub_topics.is_empty()
                                 && !sub_topics
                                     .iter()
-                                    .any(|st| st.map_or(true, |t| rpc_log.log.topics[i] == t))
+                                    .any(|st| st.is_none_or(|t| rpc_log.log.topics[i] == t))
                             {
                                 return false;
                             }

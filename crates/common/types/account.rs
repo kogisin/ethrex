@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
 use ethereum_types::{H256, U256};
@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest as _, Keccak256};
 
 use ethrex_rlp::{
-    constants::RLP_NULL,
     decode::RLPDecode,
     encode::RLPEncode,
     error::RLPDecodeError,
@@ -15,26 +14,17 @@ use ethrex_rlp::{
 };
 
 use super::GenesisAccount;
-use lazy_static::lazy_static;
-
-lazy_static! {
-    // Keccak256(""), represents the code hash for an account without code
-    pub static ref EMPTY_KECCACK_HASH: H256 = H256::from_slice(&hex::decode("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470").unwrap());
-    // Hash value for an empty trie, equal to keccak(RLP_NULL)
-    pub static ref EMPTY_TRIE_HASH: H256 = H256::from_slice(
-            Keccak256::new()
-                .chain_update([RLP_NULL])
-                .finalize()
-                .as_slice(),
-        );
-}
+use crate::{
+    constants::{EMPTY_KECCACK_HASH, EMPTY_TRIE_HASH},
+    utils::keccak,
+};
 
 #[allow(unused)]
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub info: AccountInfo,
     pub code: Bytes,
-    pub storage: HashMap<H256, U256>,
+    pub storage: BTreeMap<H256, U256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Eq)]
@@ -92,7 +82,7 @@ impl From<GenesisAccount> for Account {
 }
 
 pub fn code_hash(code: &Bytes) -> H256 {
-    keccak_hash::keccak(code.as_ref())
+    keccak(code.as_ref())
 }
 
 impl RLPEncode for AccountInfo {
@@ -166,6 +156,26 @@ impl From<&GenesisAccount> for AccountState {
             storage_root: compute_storage_root(&value.storage),
             code_hash: code_hash(&value.code),
         }
+    }
+}
+
+impl Account {
+    pub fn new(balance: U256, code: Bytes, nonce: u64, storage: BTreeMap<H256, U256>) -> Self {
+        Self {
+            info: AccountInfo {
+                balance,
+                code_hash: keccak(code.as_ref()).0.into(),
+                nonce,
+            },
+            code,
+            storage,
+        }
+    }
+}
+
+impl AccountInfo {
+    pub fn is_empty(&self) -> bool {
+        self.balance.is_zero() && self.nonce == 0 && self.code_hash == *EMPTY_KECCACK_HASH
     }
 }
 

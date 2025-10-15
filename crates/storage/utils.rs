@@ -8,7 +8,6 @@ pub enum ChainDataIndex {
     SafeBlockNumber = 3,
     LatestBlockNumber = 4,
     PendingBlockNumber = 5,
-    IsSynced = 6,
 }
 
 impl From<u8> for ChainDataIndex {
@@ -26,8 +25,7 @@ impl From<u8> for ChainDataIndex {
             x if x == ChainDataIndex::PendingBlockNumber as u8 => {
                 ChainDataIndex::PendingBlockNumber
             }
-            x if x == ChainDataIndex::IsSynced as u8 => ChainDataIndex::IsSynced,
-            _ => panic!("Invalid value when casting to ChainDataIndex: {}", value),
+            _ => panic!("Invalid value when casting to ChainDataIndex: {value}"),
         }
     }
 }
@@ -57,7 +55,7 @@ impl From<u8> for SnapStateIndex {
             2 => SnapStateIndex::StateHealPaths,
             3 => SnapStateIndex::StateTrieRebuildCheckpoint,
             4 => SnapStateIndex::StorageTrieRebuildPending,
-            _ => panic!("Invalid value when casting to SnapDataIndex: {}", value),
+            _ => panic!("Invalid value when casting to SnapDataIndex: {value}"),
         }
     }
 }

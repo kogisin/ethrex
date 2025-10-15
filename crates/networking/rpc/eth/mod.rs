@@ -6,19 +6,20 @@ pub(crate) mod filter;
 pub(crate) mod logs;
 pub(crate) mod transaction;
 
-pub(crate) mod fee_calculator;
 pub(crate) mod gas_price;
+pub(crate) mod gas_tip_estimator;
 pub(crate) mod max_priority_fee;
 
 #[cfg(test)]
 pub mod test_utils {
     use bytes::Bytes;
     use ethrex_common::{
+        Address, Bloom, H256, U256,
+        constants::DEFAULT_REQUESTS_HASH,
         types::{
             Block, BlockBody, BlockHeader, EIP1559Transaction, Genesis, LegacyTransaction,
-            Transaction, TxKind, DEFAULT_REQUESTS_HASH,
+            Transaction, TxKind,
         },
-        Address, Bloom, H256, U256,
     };
     use ethrex_storage::{EngineType, Store};
     use hex_literal::hex;
@@ -70,6 +71,7 @@ pub mod test_utils {
             excess_blob_gas: Some(0x00),
             parent_beacon_block_root: Some(H256::zero()),
             requests_hash: Some(*DEFAULT_REQUESTS_HASH),
+            ..Default::default()
         }
     }
 
@@ -78,6 +80,7 @@ pub mod test_utils {
         block_count: u64,
         txs_per_block: Vec<Transaction>,
     ) {
+        let mut new_canonical_blocks = vec![];
         for block_num in 1..=block_count {
             let block_body = BlockBody {
                 transactions: txs_per_block.clone(),
@@ -87,12 +90,21 @@ pub mod test_utils {
             let block_header = test_header(block_num);
             let block = Block::new(block_header.clone(), block_body);
             storage.add_block(block).await.unwrap();
-            storage
-                .set_canonical_block(block_num, block_header.compute_block_hash())
-                .await
-                .unwrap();
-            storage.update_latest_block_number(block_num).await.unwrap();
+            new_canonical_blocks.push((block_num, block_header.hash()));
         }
+        let Some((last_number, last_hash)) = new_canonical_blocks.pop() else {
+            return;
+        };
+        storage
+            .forkchoice_update(
+                Some(new_canonical_blocks),
+                last_number,
+                last_hash,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
     }
 
     fn legacy_tx_for_test(nonce: u64) -> Transaction {
@@ -110,6 +122,7 @@ pub mod test_utils {
             s: U256::from_big_endian(&hex!(
                 "5f6e3f188e3e6eab7d7d3b6568f5eac7d687b08d307d3154ccd8c87b4630509b"
             )),
+            ..Default::default()
         })
     }
     fn eip1559_tx_for_test(nonce: u64) -> Transaction {
@@ -129,11 +142,12 @@ pub mod test_utils {
             signature_y_parity: true,
             signature_r: U256::default(),
             signature_s: U256::default(),
+            ..Default::default()
         })
     }
 
     pub async fn setup_store() -> Store {
-        let genesis: &str = include_str!("../../../../test_data/genesis-l1.json");
+        let genesis: &str = include_str!("../../../../fixtures/genesis/l1.json");
         let genesis: Genesis =
             serde_json::from_str(genesis).expect("Fatal: test config is invalid");
         let store = Store::new("test-store", EngineType::InMemory)
@@ -173,6 +187,12 @@ pub mod test_utils {
                 }
             }
             add_blocks_with_transactions(storage, block_num, txs).await;
+        }
+    }
+
+    pub async fn add_empty_blocks(storage: &Store, block_count: u64) {
+        for block_num in 1..=block_count {
+            add_blocks_with_transactions(storage, block_num, vec![]).await;
         }
     }
 }

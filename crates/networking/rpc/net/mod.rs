@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     rpc::RpcApiContext,
@@ -10,4 +10,14 @@ pub fn version(_req: &RpcRequest, context: RpcApiContext) -> Result<Value, RpcEr
 
     let value = serde_json::to_value(format!("{}", chain_spec.chain_id))?;
     Ok(value)
+}
+
+pub async fn peer_count(_req: &RpcRequest, mut context: RpcApiContext) -> Result<Value, RpcErr> {
+    let total_peers = context
+        .peer_handler
+        .count_total_peers()
+        .await
+        .map_err(|e| RpcErr::Internal(format!("Could not retrieve peer count: {e}")))?;
+
+    Ok(json!(format!("{:#x}", total_peers)))
 }
