@@ -1,8 +1,10 @@
 use super::{message::Message, p2p::DisconnectReason};
 use crate::discv4::peer_table::PeerTableError;
+use aes::cipher::InvalidLength;
 use ethrex_blockchain::error::{ChainError, MempoolError};
 use ethrex_rlp::error::{RLPDecodeError, RLPEncodeError};
 use ethrex_storage::error::StoreError;
+#[cfg(feature = "l2")]
 use ethrex_storage_rollup::RollupStoreError;
 use thiserror::Error;
 
@@ -54,6 +56,7 @@ pub enum PeerConnectionError {
     #[error(transparent)]
     StoreError(#[from] StoreError),
     #[error(transparent)]
+    #[cfg(feature = "l2")]
     RollupStoreError(#[from] RollupStoreError),
     #[error("Error in cryptographic library: {0}")]
     CryptographyError(String),
@@ -105,8 +108,8 @@ impl From<secp256k1::Error> for PeerConnectionError {
     }
 }
 
-impl From<sha3::digest::InvalidLength> for PeerConnectionError {
-    fn from(e: sha3::digest::InvalidLength) -> Self {
+impl From<InvalidLength> for PeerConnectionError {
+    fn from(e: InvalidLength) -> Self {
         PeerConnectionError::CryptographyError(e.to_string())
     }
 }

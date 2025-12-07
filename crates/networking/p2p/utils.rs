@@ -39,6 +39,20 @@ pub fn public_key_from_signing_key(signer: &SecretKey) -> H512 {
     H512::from_slice(&encoded[1..])
 }
 
+/// Deletes the snap folders needed for downloading the leaves during the initial
+/// step of snap sync.
+pub fn delete_leaves_folder(datadir: &Path) {
+    // We ignore the errors because this can happen when the folders don't exist
+    let _ = std::fs::remove_dir_all(get_account_state_snapshots_dir(datadir));
+    let _ = std::fs::remove_dir_all(get_account_storages_snapshots_dir(datadir));
+    let _ = std::fs::remove_dir_all(get_code_hashes_snapshots_dir(datadir));
+    #[cfg(feature = "rocksdb")]
+    {
+        let _ = std::fs::remove_dir_all(get_rocksdb_temp_accounts_dir(datadir));
+        let _ = std::fs::remove_dir_all(get_rocksdb_temp_storage_dir(datadir));
+    };
+}
+
 pub fn get_account_storages_snapshots_dir(datadir: &Path) -> PathBuf {
     datadir.join("account_storages_snapshots")
 }
@@ -83,9 +97,9 @@ pub fn dump_accounts_to_rocks_db(
     let writer_options = rocksdb::Options::default();
     let mut writer = rocksdb::SstFileWriter::create(&writer_options);
     writer.open(std::path::Path::new(&path))?;
-    for (key, acccount) in contents {
+    for (key, account) in contents {
         buffer.clear();
-        acccount.encode(&mut buffer);
+        account.encode(&mut buffer);
         writer.put(key.0.as_ref(), buffer.as_slice())?;
     }
     writer.finish()

@@ -36,4 +36,10 @@ pub enum StoreError {
     IncompatibleChainConfig,
     #[error("Failed to convert index: {0}")]
     TryInto(#[from] std::num::TryFromIntError),
+    #[error("Update batch contains no blocks")]
+    UpdateBatchNoBlocks,
+    #[error("Pivot changed")]
+    PivotChanged,
+    #[error("Incompatible DB Version")]
+    IncompatibleDBVersion,
 }
